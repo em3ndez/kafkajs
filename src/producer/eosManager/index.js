@@ -3,12 +3,12 @@ const Lock = require('../../utils/lock')
 const { KafkaJSNonRetriableError } = require('../../errors')
 const COORDINATOR_TYPES = require('../../protocol/coordinatorTypes')
 const createStateMachine = require('./transactionStateMachine')
+const { INT_32_MAX_VALUE } = require('../../constants')
 const assert = require('assert')
 
 const STATES = require('./transactionStates')
 const NO_PRODUCER_ID = -1
 const SEQUENCE_START = 0
-const INT_32_MAX_VALUE = Math.pow(2, 32)
 const INIT_PRODUCER_RETRIABLE_PROTOCOL_ERRORS = [
   'NOT_COORDINATOR_FOR_GROUP',
   'GROUP_COORDINATOR_NOT_AVAILABLE',
@@ -75,10 +75,16 @@ module.exports = ({
    */
   let transactionTopicPartitions = {}
 
+  /**
+   * Offsets have been added to the transaction
+   */
+  let hasOffsetsAddedToTransaction = false
+
   const stateMachine = createStateMachine({ logger })
   stateMachine.on('transition', ({ to }) => {
     if (to === STATES.READY) {
       transactionTopicPartitions = {}
+      hasOffsetsAddedToTransaction = false
     }
   })
 
@@ -93,6 +99,22 @@ module.exports = ({
     if (!transactional) {
       throw new KafkaJSNonRetriableError('Method unavailable if non-transactional')
     }
+  }
+
+  /**
+   * A transaction is ongoing when offsets or partitions added to it
+   *
+   * @returns {boolean}
+   */
+  const isOngoing = () => {
+    return (
+      hasOffsetsAddedToTransaction ||
+      Object.entries(transactionTopicPartitions).some(([, partitions]) => {
+        return Object.entries(partitions).some(
+          ([, isPartitionAddedToTransaction]) => isPartitionAddedToTransaction
+        )
+      })
+    )
   }
 
   const eosManager = stateMachine.createGuarded(
@@ -267,6 +289,13 @@ module.exports = ({
         transactionalGuard()
         stateMachine.transitionTo(STATES.COMMITTING)
 
+        if (!isOngoing()) {
+          logger.debug('No partitions or offsets registered, not sending EndTxn')
+
+          stateMachine.transitionTo(STATES.READY)
+          return
+        }
+
         const broker = await findTransactionCoordinator()
         await broker.endTxn({
           producerId,
@@ -284,6 +313,13 @@ module.exports = ({
       async abort() {
         transactionalGuard()
         stateMachine.transitionTo(STATES.ABORTING)
+
+        if (!isOngoing()) {
+          logger.debug('No partitions or offsets registered, not sending EndTxn')
+
+          stateMachine.transitionTo(STATES.READY)
+          return
+        }
 
         const broker = await findTransactionCoordinator()
         await broker.endTxn({
@@ -352,6 +388,8 @@ module.exports = ({
           producerEpoch,
           groupId: consumerGroupId,
         })
+
+        hasOffsetsAddedToTransaction = true
 
         let groupCoordinator = await cluster.findGroupCoordinator({
           groupId: consumerGroupId,

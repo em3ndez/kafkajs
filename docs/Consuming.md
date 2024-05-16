@@ -16,24 +16,23 @@ Subscribing to some topics:
 ```javascript
 await consumer.connect()
 
-await consumer.subscribe({ topic: 'topic-A' })
+await consumer.subscribe({ topics: ['topic-A'] })
 
-// Subscribe can be called several times
-await consumer.subscribe({ topic: 'topic-B' })
-await consumer.subscribe({ topic: 'topic-C' })
+// You can subscribe to multiple topics at once
+await consumer.subscribe({ topics: ['topic-B', 'topic-C'] })
 
 // It's possible to start from the beginning of the topic
-await consumer.subscribe({ topic: 'topic-D', fromBeginning: true })
+await consumer.subscribe({ topics: ['topic-D'], fromBeginning: true })
 ```
 
-Alternatively, you can subscribe to multiple topics at once using a RegExp:
+Alternatively, you can subscribe to any topic that matches a regular expression:
 
 ```javascript
 await consumer.connect()
-await consumer.subscribe({ topic: /topic-(eu|us)-.*/i })
+await consumer.subscribe({ topics: [/topic-(eu|us)-.*/i] })
 ```
 
-The consumer will not match topics created after the subscription. If your broker has `topic-A` and `topic-B`, you subscribe to `/topic-.*/`, then `topic-C` is created, your consumer would not be automatically subscribed to `topic-C`.
+When suppling a regular expression, the consumer will not match topics created after the subscription. If your broker has `topic-A` and `topic-B`, you subscribe to `/topic-.*/`, then `topic-C` is created, your consumer would not be automatically subscribed to `topic-C`.
 
 KafkaJS offers you two ways to process your data: `eachMessage` and `eachBatch`
 
@@ -43,7 +42,7 @@ The `eachMessage` handler provides a convenient and easy to use API, feeding you
 
 ```javascript
 await consumer.run({
-    eachMessage: async ({ topic, partition, message, heartbeat }) => {
+    eachMessage: async ({ topic, partition, message, heartbeat, pause }) => {
         console.log({
             key: message.key.toString(),
             value: message.value.toString(),
@@ -54,10 +53,11 @@ await consumer.run({
 ```
 
 Be aware that the `eachMessage` handler should not block for longer than the configured [session timeout](#options) or else the consumer will be removed from the group. If your workload involves very slow processing times for individual messages then you should either increase the session timeout or make periodic use of the `heartbeat` function exposed in the handler payload.
+The `pause` function is a convenience for `consumer.pause({ topic, partitions: [partition] })`. It will pause the current topic-partition and returns a function that allows you to resume consuming later.
 
 ## <a name="each-batch"></a> eachBatch
 
-Some use cases require dealing with batches directly. This handler will feed your function batches and provide some utility functions to give your code more flexibility: `resolveOffset`, `heartbeat`, `commitOffsetsIfNecessary`, `uncommittedOffsets`, `isRunning`, and `isStale`. All resolved offsets will be automatically committed after the function is executed.
+Some use cases require dealing with batches directly. This handler will feed your function batches and provide some utility functions to give your code more flexibility: `resolveOffset`, `heartbeat`, `commitOffsetsIfNecessary`, `uncommittedOffsets`, `isRunning`, `isStale`, and `pause`. All resolved offsets will be automatically committed after the function is executed.
 
 > Note: Be aware that using `eachBatch` directly is considered a more advanced use case as compared to using `eachMessage`, since you will have to understand how session timeouts and heartbeats are connected.
 
@@ -72,6 +72,7 @@ await consumer.run({
         uncommittedOffsets,
         isRunning,
         isStale,
+        pause,
     }) => {
         for (let message of batch.messages) {
             console.log({
@@ -96,11 +97,12 @@ await consumer.run({
 * `eachBatchAutoResolve` configures auto-resolve of batch processing. If set to true, KafkaJS will automatically commit the last offset of the batch if `eachBatch` doesn't throw an error. Default: true.
 * `batch.highWatermark` is the last committed offset within the topic partition. It can be useful for calculating lag.
 * `resolveOffset()` is used to mark a message in the batch as processed. In case of errors, the consumer will automatically commit the resolved offsets.
-* `heartbeat(): Promise<void>` can be used to send heartbeat to the broker according to the set `heartbeatInterval` value in consumer [configuration](#options).
+* `heartbeat(): Promise<void>` can be used to send heartbeat to the broker according to the set `heartbeatInterval` value in consumer [configuration](#options), which means if you invoke `heartbeat()` sooner than `heartbeatInterval` it will be ignored.
 * `commitOffsetsIfNecessary(offsets?): Promise<void>` is used to commit offsets based on the autoCommit configurations (`autoCommitInterval` and `autoCommitThreshold`). Note that auto commit won't happen in `eachBatch` if `commitOffsetsIfNecessary` is not invoked. Take a look at [autoCommit](#auto-commit) for more information.
 * `uncommittedOffsets()` returns all offsets by topic-partition which have not yet been committed.
 * `isRunning()` returns true if consumer is in running state, else it returns false.
 * `isStale()` returns whether the messages in the batch have been rendered stale through some other operation and should be discarded. For example, when calling [`consumer.seek`](#seek) the messages in the batch should be discarded, as they are not at the offset we seeked to.
+* `pause()` can be used to pause the consumer for the current topic-partition. All offsets resolved up to that point will be committed (subject to `eachBatchAutoResolve` and [autoCommit](#auto-commit)). Throw an error to pause in the middle of the batch without resolving the current offset. Alternatively, disable `eachBatchAutoResolve`. The returned function can be used to resume processing of the topic-partition. See [Pause & Resume](#pause-resume) for more information about this feature.
 
 ### Example
 
@@ -205,8 +207,8 @@ The usual usage pattern for offsets stored outside of Kafka is as follows:
 The consumer group will use the latest committed offset when starting to fetch messages. If the offset is invalid or not defined, `fromBeginning` defines the behavior of the consumer group. This can be configured when subscribing to a topic:
 
 ```javascript
-await consumer.subscribe({ topic: 'test-topic', fromBeginning: true })
-await consumer.subscribe({ topic: 'other-topic', fromBeginning: false })
+await consumer.subscribe({ topics: ['test-topic'], fromBeginning: true })
+await consumer.subscribe({ topics: ['other-topic'], fromBeginning: false })
 ```
 
 When `fromBeginning` is `true`, the group will use the earliest offset. If set to `false`, it will use the latest offset. The default is `false`.
@@ -251,7 +253,7 @@ kafka.consumer({
 
 ## <a name="pause-resume"></a> Pause & Resume
 
-In order to pause and resume consuming from one or more topics, the `Consumer` provides the methods `pause` and `resume`. It also provides the `paused` method to get the list of all paused topics. Note that pausing a topic means that it won't be fetched in the next cycle. You may still receive messages for the topic within the current batch.
+In order to pause and resume consuming from one or more topics, the `Consumer` provides the methods `pause` and `resume`. It also provides the `paused` method to get the list of all paused topics. Note that pausing a topic means that it won't be fetched in the next cycle and subsequent messages within the current batch won't be passed to an `eachMessage` handler.
 
 Calling `pause` with a topic that the consumer is not subscribed to is a no-op, calling `resume` with a topic that is not paused is also a no-op.
 
@@ -261,7 +263,7 @@ Example: A situation where this could be useful is when an external dependency u
 
 ```javascript
 await consumer.connect()
-await consumer.subscribe({ topic: 'jobs' })
+await consumer.subscribe({ topics: ['jobs'] })
 
 await consumer.run({ eachMessage: async ({ topic, message }) => {
     try {
@@ -305,6 +307,27 @@ consumer.run({
 })
 ```
 
+As a convenience, the `eachMessage` callback provides a `pause` function to pause the specific topic-partition of the message currently being processed.
+
+```javascript
+await consumer.connect()
+await consumer.subscribe({ topics: ['jobs'] })
+
+await consumer.run({ eachMessage: async ({ topic, message, pause }) => {
+    try {
+        await sendToDependency(message)
+    } catch (e) {
+        if (e instanceof TooManyRequestsError) {
+            const resumeThisPartition = pause()
+            // Other partitions that are paused will continue to be paused
+            setTimeout(resumeThisPartition, e.retryAfter * 1000)
+        }
+
+        throw e
+    }
+}})
+```
+
 It's possible to access the list of paused topic partitions using the `paused` method.
 
 ```javascript
@@ -322,7 +345,7 @@ To move the offset position in a topic/partition the `Consumer` provides the met
 
 ```javascript
 await consumer.connect()
-await consumer.subscribe({ topic: 'example' })
+await consumer.subscribe({ topics: ['example'] })
 
 // you don't need to await consumer#run
 consumer.run({ eachMessage: async ({ topic, message }) => true })

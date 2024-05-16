@@ -46,8 +46,8 @@ await admin.createTopics({
 ```javascript
 {
     topic: <String>,
-    numPartitions: <Number>,     // default: 1
-    replicationFactor: <Number>, // default: 1
+    numPartitions: <Number>,     // default: -1 (uses broker `num.partitions` configuration)
+    replicationFactor: <Number>, // default: -1 (uses broker `default.replication.factor` configuration)
     replicaAssignment: <Array>,  // Example: [{ partition: 0, replicas: [0,1,2] }] - default: []
     configEntries: <Array>       // Example: [{ name: 'cleanup.policy', value: 'compact' }] - default: []
 }
@@ -65,7 +65,7 @@ await admin.createTopics({
 ```javascript
 await admin.deleteTopics({
     topics: <String[]>,
-    timeout: <Number>,
+    timeout: <Number>, // default: 5000
 })
 ```
 
@@ -104,10 +104,6 @@ await admin.createPartitions({
 | timeout        | The time in ms to wait for a topic to be completely created on the controller node                    | 5000    |
 | count          | New partition count, mandatory                                                                                   |         |
 | assignments    | Assigned brokers for each new partition                                                               | null    |
-
-## <a name="get-topic-metadata"></a> Get topic metadata
-
-Deprecated, see [Fetch topic metadata](#fetch-topic-metadata)
 
 ## <a name="fetch-topic-metadata"></a> Fetch topic metadata
 
@@ -206,11 +202,11 @@ await admin.fetchOffsets({ groupId, topics: ['topic1', 'topic2'] })
 
 Omit `topics` altogether if you want to get the consumer group offsets for all topics with committed offsets.
 
-Include the optional `resolveOffsets` flag to resolve the offsets without having to start a consumer, useful when fetching directly after calling [resetOffets](#a-name-reset-offsets-a-reset-consumer-group-offsets):
+Include the optional `resolveOffsets` flag to resolve the offsets without having to start a consumer, useful when fetching directly after calling [resetOffsets](#a-name-reset-offsets-a-reset-consumer-group-offsets):
 
 ```javascript
 await admin.resetOffsets({ groupId, topic })
-await admin.fetchOffsets({ groupId, topic, resolveOffsets: false })
+await admin.fetchOffsets({ groupId, topics: [topic], resolveOffsets: false })
 // [
 //   { partition: 0, offset: '-1' },
 //   { partition: 1, offset: '-1' },
@@ -219,7 +215,7 @@ await admin.fetchOffsets({ groupId, topic, resolveOffsets: false })
 // ]
 
 await admin.resetOffsets({ groupId, topic })
-await admin.fetchOffsets({ groupId, topic, resolveOffsets: true })
+await admin.fetchOffsets({ groupId, topics: [topic], resolveOffsets: true })
 // [
 //   { partition: 0, offset: '31004' },
 //   { partition: 1, offset: '54312' },
@@ -377,8 +373,6 @@ Example response:
 }
 ```
 
-*NOTE:* [resourceTypes](https://github.com/tulios/kafkajs/blob/master/src/protocol/resourceTypes.js) is deprecated as it mistakenly  has the ACL resource types instead of the config resource types.
-
 ## <a name="alter-configs"></a> Alter configs
 
 Update the configuration for the specified resources.
@@ -438,8 +432,6 @@ Example response:
     throttleTime: 0,
 }
 ```
-
-*NOTE:* [resourceTypes](https://github.com/tulios/kafkajs/blob/master/src/protocol/resourceTypes.js) is deprecated as it mistakenly  has the ACL resource types instead of the config resource types.
 
 ## <a name="list-groups"></a> List groups
 
@@ -688,3 +680,63 @@ Be aware that the security features might be disabled in your cluster. In that c
 ```sh
 KafkaJSProtocolError: Security features are disabled
 ```
+
+## <a name="alter-partition-reassignments"></a> Alter Partition Reassignments
+This is used to reassign the replicas that partitions are on. This method will throw exceptions in the case of errors.
+
+```typescript
+await admin.alterPartitionReassignments({
+  topics: <PartitionReassignment[]>,
+  timeout: <Number> // optional - 5000 default
+})
+```
+
+PartitionReassignment Structure:
+```typescript
+{
+  topic: <String>,
+  partitionAssignment: <Number[]> // Example: [{ partition: 0, replicas: [0,1,2] }]
+}
+```
+
+## <a name="list-partition-reassignments"></a> List Partition Reassignments
+This is used to list current partition reassignments in progress. This method will throw exceptions in the case of errors and resolve to ListPartitionReassignmentsResponse on success. If a requested partition does not exist it will not be included in the response.
+
+```javascript
+await admin.listPartitionReassignments({
+  topics: <TopicPartitions[]>, // optional, if null then all topics will be returned.
+  timeout: <Number> // optional - 5000 default
+})
+```
+
+TopicPartitions Structure:
+```typescript
+{
+  topic: <String>,
+  partitions: <Array>
+}
+```
+
+Resulting ListPartitionReassignmentsResponse Structure:
+```typescript
+{
+  topics: <OngoingTopicReassignment[]>
+}
+```
+OngoingTopicReassignment Structure:
+```typescript
+{
+  topic: <String>,
+  partitions: <OngoingPartitionReassignment[]>
+}
+```
+OngoingPartitionReassignment Structure:
+```typescript
+{
+  partitionIndex: <Number>,
+  replicas: <Number[]>, // The current replica set
+  addingReplicas: <Number[]> // The set of replicas being added
+  removingReplicas: <Number[]> // The set of replicas being removed
+}
+```
+**Note:** If a partition is not going through a reassignment, its AddingReplicas and RemovingReplicas fields will simply be empty.

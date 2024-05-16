@@ -2,8 +2,7 @@ const BrokerPool = require('./brokerPool')
 const Lock = require('../utils/lock')
 const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const createRetry = require('../retry')
-const connectionBuilder = require('./connectionBuilder')
-const flatten = require('../utils/flatten')
+const connectionPoolBuilder = require('./connectionPoolBuilder')
 const { EARLIEST_OFFSET, LATEST_OFFSET } = require('../constants')
 const {
   KafkaJSError,
@@ -73,7 +72,7 @@ module.exports = class Cluster {
     this.rootLogger = rootLogger
     this.logger = rootLogger.namespace('Cluster')
     this.retrier = createRetry(retry)
-    this.connectionBuilder = connectionBuilder({
+    this.connectionPoolBuilder = connectionPoolBuilder({
       logger: rootLogger,
       instrumentationEmitter,
       socketFactory,
@@ -85,6 +84,7 @@ module.exports = class Cluster {
       requestTimeout,
       enforceRequestTimeout,
       maxInFlightRequests,
+      reauthenticationThreshold,
     })
 
     this.targetTopics = new Set()
@@ -94,12 +94,11 @@ module.exports = class Cluster {
     })
     this.isolationLevel = isolationLevel
     this.brokerPool = new BrokerPool({
-      connectionBuilder: this.connectionBuilder,
+      connectionPoolBuilder: this.connectionPoolBuilder,
       logger: this.rootLogger,
       retry,
       allowAutoTopicCreation,
       authenticationTimeout,
-      reauthenticationThreshold,
       metadataMaxAge,
     })
     this.committedOffsetsByGroup = offsets
@@ -230,7 +229,11 @@ module.exports = class Cluster {
         try {
           await this.refreshMetadata()
         } catch (e) {
-          if (e.type === 'INVALID_TOPIC_EXCEPTION' || e.type === 'UNKNOWN_TOPIC_OR_PARTITION') {
+          if (
+            e.type === 'INVALID_TOPIC_EXCEPTION' ||
+            e.type === 'UNKNOWN_TOPIC_OR_PARTITION' ||
+            e.type === 'TOPIC_AUTHORIZATION_FAILED'
+          ) {
             this.targetTopics = previousTopics
           }
 
@@ -240,6 +243,11 @@ module.exports = class Cluster {
     } finally {
       await this.mutatingTargetTopics.release()
     }
+  }
+
+  /** @type {() => string[]} */
+  getNodeIds() {
+    return this.brokerPool.getNodeIds()
   }
 
   /**
@@ -386,6 +394,7 @@ module.exports = class Cluster {
         } catch (e) {
           this.logger.debug('Tried to find group coordinator', {
             nodeId,
+            groupId,
             error: e,
           })
 
@@ -488,7 +497,7 @@ module.exports = class Cluster {
 
     // Execute all requests, merge and normalize the responses
     const responses = await Promise.all(requests)
-    const partitionsPerTopic = flatten(responses).reduce(mergeTopics, {})
+    const partitionsPerTopic = responses.flat().reduce(mergeTopics, {})
 
     return keys(partitionsPerTopic).map(topic => ({
       topic,

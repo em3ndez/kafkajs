@@ -94,7 +94,7 @@ Note that the broker may be configured to reject your authentication attempt if 
 
 | option                    | description                                                                                                                                                                             | default |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| authenticationTimeout     | Timeout in ms for authentication requests                                                                                                                                               | `1000`  |
+| authenticationTimeout     | Timeout in ms for authentication requests                                                                                                                                               | `10000`  |
 | reauthenticationThreshold | When periodic reauthentication (`connections.max.reauth.ms`) is configured on the broker side, reauthenticate when `reauthenticationThreshold` milliseconds remain of session lifetime. | `10000` |
 
 ### PLAIN/SCRAM Example
@@ -103,7 +103,7 @@ Note that the broker may be configured to reject your authentication attempt if 
 new Kafka({
   clientId: 'my-app',
   brokers: ['kafka1:9092', 'kafka2:9092'],
-  // authenticationTimeout: 1000,
+  // authenticationTimeout: 10000,
   // reauthenticationThreshold: 10000,
   ssl: true,
   sasl: {
@@ -120,7 +120,7 @@ new Kafka({
 new Kafka({
   clientId: 'my-app',
   brokers: ['kafka1:9092', 'kafka2:9092'],
-  // authenticationTimeout: 1000,
+  // authenticationTimeout: 10000,
   // reauthenticationThreshold: 10000,
   ssl: true,
   sasl: {
@@ -229,7 +229,7 @@ const kafka = new Kafka({
 new Kafka({
   clientId: 'my-app',
   brokers: ['kafka1:9092', 'kafka2:9092'],
-  // authenticationTimeout: 1000,
+  // authenticationTimeout: 10000,
   // reauthenticationThreshold: 10000,
   ssl: true,
   sasl: {
@@ -265,6 +265,23 @@ A complete breakdown can be found in the IAM User Guide's
 It is **highly recommended** that you use SSL for encryption when using `PLAIN` or `AWS`,
 otherwise credentials will be transmitted in cleartext!
 
+### Custom Authentication Mechanisms
+
+If an authentication mechanism is not supported out of the box in KafkaJS, a custom authentication
+mechanism can be introduced as a plugin:
+
+```js
+{ 
+  sasl: { 
+      mechanism: <mechanism name>,
+      authenticationProvider: ({ host, port, logger, saslAuthenticate }) => { authenticate: () => Promise<void> }
+  }
+}
+```
+
+See [Custom Authentication Mechanisms](CustomAuthenticationMechanism.md) for more information on how to implement your own
+authentication mechanism.
+
 ## Connection Timeout
 
 Time in milliseconds to wait for a successful connection. The default value is: `1000`.
@@ -286,6 +303,16 @@ new Kafka({
   clientId: 'my-app',
   brokers: ['kafka1:9092', 'kafka2:9092'],
   requestTimeout: 25000
+})
+```
+
+The request timeout can be disabled by setting `enforceRequestTimeout` to `false`.
+
+```javascript
+new Kafka({
+  clientId: 'my-app',
+  brokers: ['kafka1:9092', 'kafka2:9092'],
+  enforceRequestTimeout: false
 })
 ```
 
@@ -416,4 +443,38 @@ const kafka = new Kafka({
   brokers: ['kafka1:9092', 'kafka2:9092'],
   socketFactory: myCustomSocketFactory,
 })
+```
+
+### Proxy support
+
+Support for proxying traffic can be implemented with a custom socket factory. In the example
+below we are using [proxy-chain](https://github.com/apify/proxy-chain) to integrate with the
+proxy server, but any other proxy library can be used as long as the socket factory interface
+is implemented.
+
+```javascript
+const tls = require('tls')
+const net = require('net')
+const { createTunnel, closeTunnel } = require('proxy-chain')
+
+const socketFactory = ({ host, port, ssl, onConnect }) => {
+  const socket = ssl ? new tls.TLSSocket() : new net.Socket()
+
+  createTunnel(process.env.HTTP_PROXY, `${host}:${port}`)
+    .then((tunnelAddress) => {
+      const [tunnelHost, tunnelPort] = tunnelAddress.split(':')
+      socket.setKeepAlive(true, 60000)
+      socket.connect(
+        Object.assign({ host: tunnelHost, port: tunnelPort, servername: host }, ssl),
+        onConnect
+      )
+
+      socket.on('close', () => {
+        closeTunnel(tunnelServer, true)
+      })
+    })
+    .catch(error => socket.emit('error', error))
+
+  return socket
+}
 ```
